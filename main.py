@@ -1,6 +1,5 @@
 from source import *
 from flask import *
-from waitress import serve
 import enum
 import os
 import time
@@ -247,4 +246,5 @@ def givethatshow():
 
 
 if __name__ == "__main__":
-    serve(app, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.debug=True
+    app.run()
