@@ -1,26 +1,111 @@
 from source import *
 from flask import *
 from waitress import serve
+import enum
+import os
+import time
 
-http_proxy = os.getenv('HTTP_PROXY') if os.getenv('HTTP_PROXY') is not None else "http://10.23.201.11:3128"
-https_proxy = os.getenv('HTTPS_PROXY') if os.getenv('HTTPS_PROXY') is not None else "http://10.23.201.11:3128"
-ftp_proxy = os.getenv('FTP_PROXY') if os.getenv('FTP_PROXY') is not None else "ftp://10.23.201.11:3128"
-
-proxies = {
-    "http": http_proxy,
-    "https": https_proxy,
-    "ftp": ftp_proxy
-}
+from logger import logging
+from bs4 import BeautifulSoup
+import requests
+import re
+import webbrowser
+import argparse
 
 port = "2096"
 cimaclub = f"https://www.cima-club.io/"
 
-def searchall(title: str, movie_or_series: Type, with_proxy=False):
-    if with_proxy:
-        search_result = BeautifulSoup(requests.get(cimaclub + "search", params={"s": title}, proxies=proxies).text,
-                                      'html.parser')
+
+class Type(enum.Enum):
+    movie = 1
+    series = 2
+
+
+def extract_season_number(season_title: str, with_proxy):
+    match = re.search(r"موسم [0-9]+", season_title)
+    if not bool(match):
+        return season_title
+    if match.group().split()[1].isdigit():
+        return match.group().split()[1]
+    return match.group()
+
+
+
+def get_episodes_links(season_link: str, with_proxy):
+    if season_link.endswith("/"):
+        season_link = season_link[:-1]
+
+    response = requests.get(season_link + "/episodes")
+
+    content = BeautifulSoup(response.text, "html.parser")
+    episodes_div = content.select('div[class*="media-block"] > div[class="content-box"]')
+    if len(episodes_div) == 0:
+        logging.error("could not extract episode links from found season link")
+        return []
+    episodes_links = [None] * len(episodes_div)
+    for i in episodes_div:
+        if i.span.em is not None and i.a["href"] is not None:
+            episodes_links[int(i.span.em.text) - 1] = i.a["href"]
+    while episodes_links[-1] is None:
+        episodes_links.pop()
+    return episodes_links
+
+
+def generate_list_of_links_to_download(chosen_episode, episodes) -> list:
+    if chosen_episode == "all":
+        first_episode = 1
+        last_episode = len(episodes)
     else:
-        search_result = BeautifulSoup(requests.get(cimaclub + "search", params={"s": title}).text, 'html.parser')
+        string = chosen_episode.split("-")
+        first_episode = int(string[0])
+        last_episode = int(string[1])
+        if first_episode < 1 or last_episode > len(episodes):
+            raise RuntimeError("the fist episode must be > 1 and the last one must be within the range of the season")
+    for i in range(first_episode - 1, last_episode):
+        if episodes[i] is not None:
+            episodes[i] = episodes[i].replace("episode", "watch")
+    return episodes[first_episode - 1:last_episode]
+
+
+
+def get_download_links(url: str, with_proxy):
+    """
+    :param with_proxy:
+    :param url: the download link - should be in the form : https://www.cima-club.cc:..../watch/....
+    :return: a list of the download links --> watch out, there will be other links in there
+    """
+
+    response = requests.get(url)
+    content = BeautifulSoup(response.text, "html.parser")
+    downloads_links = content.select_one('div[class*="downloads"]')
+    if downloads_links is None:
+        logging.error("downloads section not found, please choose a different episode/movie to download")
+        logging.error("to exit please click ctrl+c")
+        raise RuntimeError()
+    download_link = ""
+    for i in downloads_links.findChildren("a"):
+        if "gvid" in i["href"] or "govid" in i["href"]:
+            download_link = i["href"]
+            break
+    if download_link == "":
+        logging.error("download link not found, please choose a different episode/movie to download")
+        logging.error("to exit please click ctrl+c")
+        raise RuntimeError()  # gvid links not found
+
+
+    req = requests.get(download_link, headers={'referer': 'https://cima-club.io/'})
+    if not str(req.status_code).startswith("2"):
+        logging.error("govid server is unreachable")
+        return []
+    download_page = BeautifulSoup(req.text, 'html.parser')
+    L = []
+    for i in download_page.find_all("a"):
+        L.append(i["href"])
+    return L
+
+def searchall(title: str, movie_or_series: Type, with_proxy=False):
+
+    search_result = BeautifulSoup(requests.get(cimaclub + "search", params={"s": title}).text, 'html.parser')
     links = []
     titles = []
     for i in search_result.select('div[class*="media-block"] > div'):
@@ -95,11 +180,9 @@ def choose_multiple_quality(qualities: set, links_list: list, title: str,qualtyt
 
 
 def searchonemovie(chosen: int,title: str, movie_or_series: Type, with_proxy=False ):
-    if with_proxy:
-        search_result = BeautifulSoup(requests.get(cimaclub + "search", params={"s": title}, proxies=proxies).text,
-                                      'html.parser')
-    else:
-        search_result = BeautifulSoup(requests.get(cimaclub + "search", params={"s": title}).text, 'html.parser')
+
+
+    search_result = BeautifulSoup(requests.get(cimaclub + "search", params={"s": title}).text, 'html.parser')
     links = []
     titles = []
     for i in search_result.select('div[class*="media-block"] > div'):
